@@ -1,4 +1,4 @@
-"""
+﻿"""
 Agent for trend analysis in high-frequency trading (HFT) context.
 Uses LLM and toolkit to generate and interpret trendline charts for short-term prediction.
 """
@@ -21,16 +21,15 @@ def invoke_with_retry(call_fn, *args, retries=3, wait_sec=4):
             return result
         except RateLimitError:
             print(
-                f"Rate limit hit, retrying in {wait_sec}s (attempt {attempt + 1}/{retries})..."
+                f"触发限流，{wait_sec}秒后重试 (attempt {attempt + 1}/{retries})..."
             )
         except Exception as e:
             print(
-                f"Other error: {e}, retrying in {wait_sec}s (attempt {attempt + 1}/{retries})..."
+                f"调用异常: {e}，{wait_sec}秒后重试 (attempt {attempt + 1}/{retries})..."
             )
-        # Only sleep if not the last attempt
         if attempt < retries - 1:
             time.sleep(wait_sec)
-    raise RuntimeError("Max retries exceeded")
+    raise RuntimeError("超过最大重试次数")
 
 
 def create_trend_agent(tool_llm, graph_llm, toolkit):
@@ -39,49 +38,40 @@ def create_trend_agent(tool_llm, graph_llm, toolkit):
     """
 
     def trend_agent_node(state):
-        # --- Tool definitions ---
         tools = [toolkit.generate_trend_image]
         time_frame = state["time_frame"]
 
-        # --- Check for precomputed image in state ---
         trend_image_b64 = state.get("trend_image")
 
         messages = []
 
-        # --- If no precomputed image, fall back to tool generation ---
         if not trend_image_b64:
-            print("No precomputed trend image found in state, generating with tool...")
+            print("state中没有预生成趋势图，开始使用工具生成...")
 
-            # --- System prompt for LLM ---
             system_prompt = (
-                "You are a K-line trend pattern recognition assistant operating in a high-frequency trading context. "
-                "You must first call the tool `generate_trend_image` using the provided `kline_data`. "
-                "Once the chart is generated, analyze the image for support/resistance trendlines and known candlestick patterns. "
-                "Only then should you proceed to make a prediction about the short-term trend (upward, downward, or sideways). "
-                "Do not make any predictions before generating and analyzing the image."
+                "你是高频交易场景下的K线趋势识别助手。"
+                "你必须先调用 `generate_trend_image` 工具，并传入 `kline_data`。"
+                "图像生成后，再分析支撑/阻力趋势线以及可识别K线结构。"
+                "最后给出短期趋势判断: 上涨、下跌或震荡。"
+                "在图像生成并分析完成前，不得提前给出预测。"
             )
 
-            # --- Compose messages for the first round ---
             messages = [
                 SystemMessage(content=system_prompt),
                 HumanMessage(
-                    content=f"Here is the recent kline data:\n{json.dumps(state['kline_data'], indent=2)}"
+                    content=f"以下是近期K线数据:\n{json.dumps(state['kline_data'], indent=2)}"
                 ),
             ]
 
-            # --- Prepare tool chain ---
             chain = tool_llm.bind_tools(tools)
 
-            # --- Step 1: Let LLM decide if it wants to call generate_trend_image ---
             ai_response = invoke_with_retry(chain.invoke, messages)
             messages.append(ai_response)
 
-            # --- Step 2: Handle tool call (generate_trend_image) ---
             if hasattr(ai_response, "tool_calls"):
                 for call in ai_response.tool_calls:
                     tool_name = call["name"]
                     tool_args = call["args"]
-                    # Always provide kline_data
                     import copy
 
                     tool_args["kline_data"] = copy.deepcopy(state["kline_data"])
@@ -94,18 +84,17 @@ def create_trend_agent(tool_llm, graph_llm, toolkit):
                         )
                     )
         else:
-            print("Using precomputed trend image from state")
+            print("使用state中预生成的趋势图")
 
-        # --- Step 3: Vision analysis with image (precomputed or generated) ---
         if trend_image_b64:
             image_prompt = [
                 {
                     "type": "text",
                     "text": (
-                        f"This candlestick ({time_frame} K-line) chart includes automated trendlines: the **blue line** is support, and the **red line** is resistance, both derived from recent closing prices.\n\n"
-                        "Analyze how price interacts with these lines — are candles bouncing off, breaking through, or compressing between them?\n\n"
-                        "Based on trendline slope, spacing, and recent K-line behavior, predict the likely short-term trend: **upward**, **downward**, or **sideways**. "
-                        "Support your prediction with respect to prediction, reasoning, signals."
+                        f"这是一张 {time_frame} 周期K线图，图中已自动叠加趋势线: 蓝线为支撑线，红线为阻力线，均来自近期收盘价拟合。\n\n"
+                        "请分析价格与趋势线的互动关系: 是否反弹、跌破/突破，或在区间内持续压缩。\n\n"
+                        "结合趋势线斜率、线间距和近期K线行为，判断短期趋势更可能是: 上涨、下跌或震荡。"
+                        "请给出结论并说明依据(关键信号与推理过程)。"
                     ),
                 },
                 {
@@ -114,24 +103,20 @@ def create_trend_agent(tool_llm, graph_llm, toolkit):
                 },
             ]
 
-            # Create messages - ensure HumanMessage has valid content
-            # For Anthropic, SystemMessage is extracted separately, but messages array must have at least one message
             human_msg = HumanMessage(content=image_prompt)
-            
-            # Verify HumanMessage content is valid
+
             if not human_msg.content:
                 raise ValueError("HumanMessage content is empty")
             if isinstance(human_msg.content, list) and len(human_msg.content) == 0:
                 raise ValueError("HumanMessage content list is empty")
-            
+
             messages = [
                 SystemMessage(
-                    content="You are a K-line trend pattern recognition assistant operating in a high-frequency trading context. "
-                    "Your task is to analyze candlestick charts annotated with support and resistance trendlines."
+                    content="你是高频交易场景下的K线趋势识别助手，任务是分析含支撑/阻力线的K线图并判断短期走势。"
                 ),
                 human_msg,
             ]
-            
+
             try:
                 final_response = invoke_with_retry(
                     graph_llm.invoke,
@@ -139,11 +124,8 @@ def create_trend_agent(tool_llm, graph_llm, toolkit):
                 )
             except Exception as e:
                 error_str = str(e)
-                # Handle Anthropic's "at least one message is required" error
-                # This can happen when SystemMessage extraction leaves empty messages array
                 if "at least one message" in error_str.lower():
-                    # Retry with only HumanMessage (SystemMessage will be lost but Anthropic should work)
-                    print("Retrying with HumanMessage only due to Anthropic message conversion issue...")
+                    print("Anthropic消息转换异常，改为仅传HumanMessage重试...")
                     final_response = invoke_with_retry(
                         graph_llm.invoke,
                         [human_msg],
@@ -151,7 +133,6 @@ def create_trend_agent(tool_llm, graph_llm, toolkit):
                 else:
                     raise
         else:
-            # If no image was generated, fall back to reasoning with messages
             final_response = invoke_with_retry(chain.invoke, messages)
 
         return {
@@ -160,7 +141,7 @@ def create_trend_agent(tool_llm, graph_llm, toolkit):
             "trend_image": trend_image_b64,
             "trend_image_filename": "trend_graph.png",
             "trend_image_description": (
-                "Trend-enhanced candlestick chart with support/resistance lines"
+                "带支撑/阻力趋势线的K线图"
                 if trend_image_b64
                 else None
             ),

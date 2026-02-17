@@ -1,0 +1,21 @@
+services:
+  quantagent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quantagent
+    ports:
+      - "5000:5000"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      CODEX_HOME: /root/.codex
+      FLASK_ENV: production
+    volumes:
+      - ./data:/app/data
+      - type: bind
+        source: ${CODEX_AUTH_FILE}
+        target: /root/.codex/auth.json
+        read_only: true
+    restart: unless-stopped

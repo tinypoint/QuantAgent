@@ -17,6 +17,18 @@ from trading_graph import TradingGraph
 app = Flask(__name__)
 
 
+def _provider_display_name(provider: str) -> str:
+    if provider == "openai-codex":
+        return "OpenAI Codex"
+    if provider == "openai":
+        return "OpenAI"
+    if provider == "anthropic":
+        return "Anthropic"
+    if provider == "qwen":
+        return "Qwen"
+    return provider
+
+
 class WebTradingAnalyzer:
     def __init__(self):
         """Initialize the web trading analyzer."""
@@ -75,6 +87,50 @@ class WebTradingAnalyzer:
         # Load persisted custom assets
         self.custom_assets_file = self.data_dir / "custom_assets.json"
         self.custom_assets = self.load_custom_assets()
+
+    @staticmethod
+    def _read_codex_credentials():
+        codex_home = os.environ.get("CODEX_HOME", "~/.codex")
+        auth_path = Path(codex_home).expanduser() / "auth.json"
+        if not auth_path.exists():
+            return None, None
+        try:
+            raw = json.loads(auth_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None, None
+
+        tokens = raw.get("tokens", {})
+        if not isinstance(tokens, dict):
+            return None, None
+
+        access_token = tokens.get("access_token")
+        account_id = tokens.get("account_id")
+        if isinstance(access_token, str) and access_token.strip():
+            normalized_account_id = (
+                account_id.strip()
+                if isinstance(account_id, str) and account_id.strip()
+                else None
+            )
+            return access_token.strip(), normalized_account_id
+        return None, None
+
+    @staticmethod
+    def _normalize_llm_text(value: Any) -> str:
+        """Normalize LLM output blocks (str/list/dict) into plain text."""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            if isinstance(value.get("text"), str):
+                return value["text"]
+            if "content" in value:
+                return WebTradingAnalyzer._normalize_llm_text(value.get("content"))
+            return json.dumps(value, ensure_ascii=False)
+        if isinstance(value, list):
+            parts = [WebTradingAnalyzer._normalize_llm_text(item) for item in value]
+            return "\n".join([p for p in parts if p])
+        return str(value)
 
     def fetch_yfinance_data(
         self, symbol: str, interval: str, start_date: str, end_date: str
@@ -242,13 +298,8 @@ class WebTradingAnalyzer:
             print(f"DataFrame index: {type(df.index)}")
             print(f"DataFrame shape: {df.shape}")
 
-            # Prepare data for analysis
-            # if len(df) > 49:
-            #     df_slice = df.tail(49).iloc[:-3]
-            # else:
-            #     df_slice = df.tail(45)
-
-            df_slice = df.tail(45)
+            # Prepare data for analysis: use the full selected date range
+            df_slice = df.copy()
 
             # Ensure DataFrame has the expected structure
             required_columns = ["Datetime", "Open", "High", "Low", "Close"]
@@ -323,12 +374,7 @@ class WebTradingAnalyzer:
             
             # Get current provider from config
             provider = self.config.get("agent_llm_provider", "openai")
-            if provider == "openai":
-                provider_name = "OpenAI"
-            elif provider == "anthropic":
-                provider_name = "Anthropic"
-            else:
-                provider_name = "Qwen"
+            provider_name = _provider_display_name(provider)
 
             # Check for specific API key authentication errors
             if (
@@ -367,10 +413,16 @@ class WebTradingAnalyzer:
         final_state = results["final_state"]
 
         # Extract analysis results from state fields
-        technical_indicators = final_state.get("indicator_report", "")
-        pattern_analysis = final_state.get("pattern_report", "")
-        trend_analysis = final_state.get("trend_report", "")
-        final_decision_raw = final_state.get("final_trade_decision", "")
+        technical_indicators = self._normalize_llm_text(
+            final_state.get("indicator_report", "")
+        )
+        pattern_analysis = self._normalize_llm_text(
+            final_state.get("pattern_report", "")
+        )
+        trend_analysis = self._normalize_llm_text(final_state.get("trend_report", ""))
+        final_decision_raw = self._normalize_llm_text(
+            final_state.get("final_trade_decision", "")
+        )
 
         # Extract chart data if available
         pattern_chart = final_state.get("pattern_image", "")
@@ -507,6 +559,14 @@ class WebTradingAnalyzer:
                 )
                 
                 provider_name = "OpenAI"
+            elif provider == "openai-codex":
+                access_token, _ = self._read_codex_credentials()
+                if not access_token:
+                    return {
+                        "valid": False,
+                        "error": "OpenAI Codex auth not found. Please provide ~/.codex/auth.json (or set CODEX_HOME) with tokens.access_token.",
+                    }
+                provider_name = "OpenAI Codex"
             elif provider == "anthropic":
                 from anthropic import Anthropic
                 api_key = os.environ.get("ANTHROPIC_API_KEY") or self.config.get("anthropic_api_key", "")
@@ -548,12 +608,7 @@ class WebTradingAnalyzer:
             # Determine provider name for error messages
             if provider is None:
                 provider = self.config.get("agent_llm_provider", "openai")
-            if provider == "openai":
-                provider_name = "OpenAI"
-            elif provider == "anthropic":
-                provider_name = "Anthropic"
-            else:
-                provider_name = "Qwen"
+            provider_name = _provider_display_name(provider)
 
             if (
                 "authentication" in error_msg.lower()
@@ -870,8 +925,8 @@ def update_provider():
         data = request.get_json()
         provider = data.get("provider", "openai")
 
-        if provider not in ["openai", "anthropic", "qwen"]:
-            return jsonify({"error": "Provider must be 'openai', 'anthropic', or 'qwen'"})
+        if provider not in ["openai", "openai-codex", "anthropic", "qwen"]:
+            return jsonify({"error": "Provider must be 'openai', 'openai-codex', 'anthropic', or 'qwen'"})
 
         print(f"Updating provider to: {provider}")
 
@@ -894,12 +949,17 @@ def update_provider():
                 analyzer.config["agent_llm_model"] = "qwen3-max"
             if not analyzer.config["graph_llm_model"].startswith("qwen"):
                 analyzer.config["graph_llm_model"] = "qwen3-vl-plus"
+        elif provider == "openai-codex":
+            if not analyzer.config["agent_llm_model"].startswith("gpt-5"):
+                analyzer.config["agent_llm_model"] = "gpt-5.3-codex"
+            if not analyzer.config["graph_llm_model"].startswith("gpt-5"):
+                analyzer.config["graph_llm_model"] = "gpt-5.3-codex"
             
         else:
             # Set default OpenAI models if not already set to OpenAI models
-            if analyzer.config["agent_llm_model"].startswith(("claude", "qwen")):
+            if analyzer.config["agent_llm_model"].startswith(("claude", "qwen", "gpt-5")):
                 analyzer.config["agent_llm_model"] = "gpt-4o-mini"
-            if analyzer.config["graph_llm_model"].startswith(("claude", "qwen")):
+            if analyzer.config["graph_llm_model"].startswith(("claude", "qwen", "gpt-5")):
                 analyzer.config["graph_llm_model"] = "gpt-4o"
         
         analyzer.trading_graph.config.update(analyzer.config)
@@ -925,11 +985,18 @@ def update_api_key():
         new_api_key = data.get("api_key")
         provider = data.get("provider", "openai")  # Default to "openai" for backward compatibility
 
+        if provider not in ["openai", "openai-codex", "anthropic", "qwen"]:
+            return jsonify({"error": "Provider must be 'openai', 'openai-codex', 'anthropic', or 'qwen'"})
+
+        if provider == "openai-codex":
+            return jsonify(
+                {
+                    "error": "OpenAI Codex uses ~/.codex/auth.json and does not require manual API key input."
+                }
+            )
+
         if not new_api_key:
             return jsonify({"error": "API key is required"})
-
-        if provider not in ["openai", "anthropic", "qwen"]:
-            return jsonify({"error": "Provider must be 'openai', 'anthropic', or 'qwen'"})
 
         print(f"Updating {provider} API key to: {new_api_key[:8]}...{new_api_key[-4:]}")
 
@@ -964,6 +1031,9 @@ def get_api_key_status():
             # Fallback to config if not in environment
             if not api_key and hasattr(analyzer, 'config'):
                 api_key = analyzer.config.get("api_key", "")
+        elif provider == "openai-codex":
+            access_token, _ = analyzer._read_codex_credentials()
+            api_key = access_token or ""
         elif provider == "anthropic":
             api_key = os.environ.get("ANTHROPIC_API_KEY", "")
             # Fallback to config if not in environment

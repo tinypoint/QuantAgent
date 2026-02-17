@@ -166,7 +166,8 @@ class TechnicalTools:
             dict: base64 image and description
         """
         data = pd.DataFrame(kline_data)
-        candles = data.iloc[-50:].copy()
+        # Use full selected range instead of truncating to recent 50 bars.
+        candles = data.copy()
 
         candles["Datetime"] = pd.to_datetime(candles["Datetime"])
         candles.set_index("Datetime", inplace=True)
@@ -274,8 +275,7 @@ class TechnicalTools:
         """
 
         df = pd.DataFrame(kline_data)
-        # take recent 40
-        df = df.tail(40)
+        # Use full selected range instead of truncating to recent 40 bars.
 
         df.to_csv("record.csv", index=False, date_format="%Y-%m-%d %H:%M:%S")
         try:

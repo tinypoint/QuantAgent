@@ -3,8 +3,10 @@ TradingGraph: Orchestrates the multi-agent trading system using LangChain and La
 Initializes LLMs, toolkits, and agent nodes for indicator, pattern, and trend analysis.
 """
 
+import json
 import os
-from typing import Dict
+from pathlib import Path
+from typing import Dict, Optional, Tuple
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
@@ -22,6 +24,34 @@ class TradingGraph:
     Main orchestrator for the multi-agent trading system.
     Sets up LLMs, toolkits, and agent nodes for indicator, pattern, and trend analysis.
     """
+
+    @staticmethod
+    def _read_codex_credentials() -> Tuple[Optional[str], Optional[str]]:
+        """Read Codex OAuth credentials from CODEX_HOME/auth.json (or ~/.codex/auth.json)."""
+        codex_home = os.environ.get("CODEX_HOME", "~/.codex")
+        auth_path = Path(codex_home).expanduser() / "auth.json"
+        if not auth_path.exists():
+            return None, None
+
+        try:
+            raw = json.loads(auth_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None, None
+
+        tokens = raw.get("tokens", {})
+        if not isinstance(tokens, dict):
+            return None, None
+
+        access_token = tokens.get("access_token")
+        account_id = tokens.get("account_id")
+        if isinstance(access_token, str) and access_token.strip():
+            normalized_account_id = (
+                account_id.strip()
+                if isinstance(account_id, str) and account_id.strip()
+                else None
+            )
+            return access_token.strip(), normalized_account_id
+        return None, None
 
     def __init__(self, config=None):
         # --- Configuration and LLMs ---
@@ -59,7 +89,7 @@ class TradingGraph:
         Get API key with proper validation and error handling.
         
         Args:
-            provider: The provider name ("openai", "anthropic", or "qwen")
+            provider: The provider name ("openai", "openai-codex", "anthropic", or "qwen")
         
         Returns:
             str: The API key for the specified provider
@@ -88,6 +118,13 @@ class TradingGraph:
                 raise ValueError(
                     "Please replace the placeholder API key with your actual OpenAI API key. "
                     "You can get one from: https://platform.openai.com/api-keys"
+                )
+        elif provider == "openai-codex":
+            api_key, _ = self._read_codex_credentials()
+            if not api_key:
+                raise ValueError(
+                    "OpenAI Codex auth not found. Please provide ~/.codex/auth.json "
+                    "(or set CODEX_HOME to that folder) with tokens.access_token."
                 )
         elif provider == "anthropic":
             # First check if API key is provided in config
@@ -132,7 +169,9 @@ class TradingGraph:
                     "You can get one from: https://dashscope.console.aliyun.com/"
                 )
         else:
-            raise ValueError(f"Unsupported provider: {provider}. Must be 'openai', 'anthropic', or 'qwen'")
+            raise ValueError(
+                f"Unsupported provider: {provider}. Must be 'openai', 'openai-codex', 'anthropic', or 'qwen'"
+            )
         
         return api_key
 
@@ -143,7 +182,7 @@ class TradingGraph:
         Create an LLM instance based on the provider.
         
         Args:
-            provider: The provider name ("openai", "anthropic", or "qwen")
+            provider: The provider name ("openai", "openai-codex", "anthropic", or "qwen")
             model: The model name (e.g., "gpt-4o", "claude-3-5-sonnet-20241022", "qwen-vl-max-latest")
             temperature: The temperature setting for the model
             
@@ -157,6 +196,30 @@ class TradingGraph:
                 model=model,
                 temperature=temperature,
                 api_key=api_key,
+            )
+        elif provider == "openai-codex":
+            _, account_id = self._read_codex_credentials()
+            headers = {
+                "origin": "https://chatgpt.com",
+                "referer": "https://chatgpt.com/",
+            }
+            if account_id:
+                headers["chatgpt-account-id"] = account_id
+            codex_instructions = os.environ.get(
+                "OPENAI_CODEX_INSTRUCTIONS",
+                "你是一名有帮助的量化交易分析助手。",
+            )
+            return ChatOpenAI(
+                model=model,
+                temperature=temperature,
+                api_key=api_key,
+                base_url="https://chatgpt.com/backend-api/codex",
+                streaming=True,
+                default_headers=headers,
+                extra_body={
+                    "instructions": codex_instructions,
+                    "store": False,
+                },
             )
         elif provider == "anthropic":
             # ChatAnthropic handles SystemMessage extraction automatically
@@ -175,7 +238,9 @@ class TradingGraph:
                 max_retries=4,
             )
         else:
-            raise ValueError(f"Unsupported provider: {provider}. Must be 'openai', 'anthropic', or 'qwen'")
+            raise ValueError(
+                f"Unsupported provider: {provider}. Must be 'openai', 'openai-codex', 'anthropic', or 'qwen'"
+            )
 
     # def _set_tool_nodes(self) -> Dict[str, ToolNode]:
     #     """
@@ -234,7 +299,7 @@ class TradingGraph:
         
         Args:
             api_key (str): The new API key
-            provider (str): The provider name ("openai" or "anthropic"), defaults to "openai"
+            provider (str): The provider name ("openai", "anthropic", or "qwen"), defaults to "openai"
         """
         if provider == "openai":
             # Update the config with the new API key
@@ -255,7 +320,9 @@ class TradingGraph:
             # Also update the environment variable for consistency
             os.environ["DASHSCOPE_API_KEY"] = api_key
         else:
-            raise ValueError(f"Unsupported provider: {provider}. Must be 'openai', 'anthropic', or 'qwen'")
+            raise ValueError(
+                f"Unsupported provider: {provider}. Must be 'openai', 'anthropic', or 'qwen'"
+            )
         
         # Refresh the LLMs with the new API key
         self.refresh_llms()
